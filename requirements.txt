@@ -1,1 +1,3 @@
-
+# download https://www.synapse.org/Synapse:syn60086071 and save into ./dataset folder
+nilearn~=0.12.1
+synapseclient~=4.10.0
