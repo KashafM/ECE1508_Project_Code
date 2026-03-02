@@ -14,6 +14,14 @@ import torch
 from pipeline.config import PipelineConfig
 
 
+def _frame_to_markdown(df: pd.DataFrame) -> str:
+    """Render a DataFrame as markdown; fall back to plain text if tabulate is unavailable."""
+    try:
+        return df.to_markdown(index=False)
+    except ImportError:
+        return "```\n" + df.to_string(index=False) + "\n```"
+
+
 def _history_to_frame(history) -> pd.DataFrame:
     data = {
         "epoch": list(range(1, len(history.train_loss) + 1)),
@@ -169,7 +177,7 @@ def generate_reports(config: PipelineConfig, results: List) -> None:
         md_lines.append(f"- Channels: {config.dataset.n_channels}")
         md_lines.append("")
         md_lines.append("## Model Comparison")
-        md_lines.append(summary_df.to_markdown(index=False))
+        md_lines.append(_frame_to_markdown(summary_df))
         md_lines.append("")
         if config.reporting.include_figures:
             md_lines.append("## Artifacts")

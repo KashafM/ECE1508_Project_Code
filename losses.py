@@ -227,6 +227,9 @@ class CombinedLoss(nn.Module):
     
     def _compute_loss(self, input, target):
         """Compute combined loss for a single scale"""
+        if input.shape[2:] != target.shape[1:]:
+            input = F.interpolate(input, size=target.shape[1:], mode='bilinear', align_corners=False)
+
         total_loss = 0
         
         if self.ce_weight > 0:
@@ -273,6 +276,9 @@ class WeightedCrossEntropyLoss(nn.Module):
         Returns:
             Weighted cross entropy loss
         """
+        if input.shape[2:] != target.shape[1:]:
+            input = F.interpolate(input, size=target.shape[1:], mode='bilinear', align_corners=False)
+
         # Move weight to same device as input
         weight = self.weight.to(input.device)
         
