@@ -162,7 +162,7 @@ if __name__ == "__main__":
     import matplotlib.patches as mpatches
 
     N = 6  # samples to display
-    CMAP = plt.cm.get_cmap("tab10", NUM_CLASSES)
+    CMAP = plt.colormaps["tab10"].resampled(NUM_CLASSES)
 
     ds = GreyCircleDataset(num_samples=N)
     print(f"Dataset length : {len(ds)}")

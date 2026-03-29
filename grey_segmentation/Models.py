@@ -182,9 +182,96 @@ def get_models(device):
 
 
 if __name__ == "__main__":
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    dummy = torch.randn(2, 1, 128, 128).to(device)
-    for name, model in get_models(device).items():
-        out = model(dummy)
-        params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"{name:15s}  output: {tuple(out.shape)}  params: {params:,}")
+    import torch.optim as optim
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    from DataGen import GreyCircleDataset, NUM_CLASSES, CLASS_NAMES
+
+    DEVICE     = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    QUICK_EPOCHS = 5
+    QUICK_TRAIN  = 300
+    BATCH        = 16
+    N_SHOW       = 4          # images to visualise per model
+
+    CMAP = plt.colormaps["tab10"].resampled(NUM_CLASSES)
+
+    # ---- param count summary ------------------------------------------------
+    print(f"Device: {DEVICE}\n")
+    dummy = torch.randn(2, 1, 128, 128).to(DEVICE)
+    for name, m in get_models(DEVICE).items():
+        out = m(dummy)
+        params = sum(p.numel() for p in m.parameters() if p.requires_grad)
+        print(f"  {name:15s}  output: {tuple(out.shape)}  params: {params:,}")
+
+    # ---- quick mini-train so predictions are meaningful --------------------
+    from torch.utils.data import DataLoader
+
+    train_ds = GreyCircleDataset(num_samples=QUICK_TRAIN)
+    train_loader = DataLoader(train_ds, batch_size=BATCH, shuffle=True, num_workers=0)
+
+    models = get_models(DEVICE)
+    criterion = nn.CrossEntropyLoss()
+
+    print(f"\nQuick-training each model for {QUICK_EPOCHS} epochs "
+          f"on {QUICK_TRAIN} samples …")
+    for name, model in models.items():
+        opt = optim.Adam(model.parameters(), lr=1e-3)
+        model.train()
+        for epoch in range(QUICK_EPOCHS):
+            epoch_loss = 0.0
+            for imgs, msks in train_loader:
+                imgs, msks = imgs.to(DEVICE), msks.to(DEVICE)
+                opt.zero_grad()
+                loss = criterion(model(imgs), msks)
+                loss.backward()
+                opt.step()
+                epoch_loss += loss.item()
+            print(f"  {name}  epoch {epoch+1}/{QUICK_EPOCHS}  "
+                  f"loss={epoch_loss/len(train_loader):.4f}")
+
+    # ---- visualise predictions on fresh samples ----------------------------
+    vis_ds = GreyCircleDataset(num_samples=N_SHOW)
+    n_models = len(models)
+
+    # Columns: input | ground truth | model-1 | model-2 | model-3
+    n_cols = 2 + n_models
+    fig, axes = plt.subplots(N_SHOW, n_cols,
+                             figsize=(2.8 * n_cols, 2.8 * N_SHOW))
+    col_titles = ["Input", "Ground Truth"] + list(models.keys())
+
+    for col, title in enumerate(col_titles):
+        axes[0, col].set_title(title, fontsize=9, fontweight="bold")
+
+    for row in range(N_SHOW):
+        img, msk = vis_ds[row]
+
+        # Input (greyscale)
+        axes[row, 0].imshow(img.squeeze(0).numpy(), cmap="gray", vmin=0, vmax=1)
+        axes[row, 0].axis("off")
+
+        # Ground truth mask
+        axes[row, 1].imshow(msk.numpy(), cmap=CMAP, vmin=0, vmax=NUM_CLASSES - 1)
+        axes[row, 1].axis("off")
+
+        # Each model's prediction
+        for col, (name, model) in enumerate(models.items(), start=2):
+            model.eval()
+            with torch.no_grad():
+                logits = model(img.unsqueeze(0).to(DEVICE))
+            pred = logits.argmax(dim=1).squeeze(0).cpu().numpy()
+            axes[row, col].imshow(pred, cmap=CMAP, vmin=0, vmax=NUM_CLASSES - 1)
+            axes[row, col].axis("off")
+
+    # Shared legend
+    patches = [mpatches.Patch(color=CMAP(c), label=f"{c}: {CLASS_NAMES[c]}")
+               for c in range(NUM_CLASSES)]
+    fig.legend(handles=patches, loc="lower center", ncol=NUM_CLASSES,
+               fontsize=8, bbox_to_anchor=(0.5, -0.01))
+
+    plt.suptitle(f"Model predictions after {QUICK_EPOCHS}-epoch quick-train  "
+                 f"(col 0: input | col 1: GT | rest: model outputs)",
+                 fontsize=10, fontweight="bold")
+    plt.tight_layout()
+    plt.savefig("model_preview.png", dpi=130, bbox_inches="tight")
+    plt.show()
+    print("\nSaved model_preview.png")

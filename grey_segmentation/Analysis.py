@@ -205,7 +205,7 @@ def plot_qualitative(models_dict, test_loader, save_path="qualitative.png"):
 
     n_images = images_batch.shape[0]
     n_models = len(models_dict)
-    cmap = plt.cm.get_cmap("tab10", NUM_CLASSES)
+    cmap = plt.colormaps["tab10"].resampled(NUM_CLASSES)
 
     fig, axes = plt.subplots(n_images, 2 + n_models,
                              figsize=(3 * (2 + n_models), 3 * n_images))
