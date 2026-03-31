@@ -1,305 +1,340 @@
+"""
+Analysis.py
+-----------
+Train and compare 2D vs 3D UNet models for brain tumour segmentation.
+
+2D approach: each volume [B,4,H,W] is split into B*4 independent slices
+             processed one at a time — no inter-slice context.
+
+3D approach: the full volume [B,1,4,H,W] is processed jointly — the model
+             sees all 4 slices simultaneously and can exploit inter-slice
+             context to detect tumours that span multiple slices.
+
+Outputs:
+  training_curves.png   — loss / accuracy / IoU per epoch for all 6 models
+  test_results.png      — bar chart of final test metrics
+  qualitative.png       — sample predictions vs ground truth
+  Console report        — declares which dimension wins and by how much
+"""
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
-import numpy as np
+import matplotlib.patches as mpatches
 
-from DataGen import get_dataloaders, NUM_CLASSES, GREY_SHADES
-from Models import get_models
+from DataGen import get_dataloaders, NUM_CLASSES, CLASS_NAMES
+from Models  import get_2d_models, get_3d_models
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 EPOCHS = 15
-LR = 1e-3
-BATCH_SIZE = 16
-CLASS_NAMES = ["Background"] + [f"Grey-{v}" for v in GREY_SHADES]
+LR     = 1e-3
+BATCH  = 12   # volume batch size; 2D sees BATCH*N_SLICES slices per step
 
 
-# ---------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────
 # Metrics
-# ---------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────
 
-def pixel_accuracy(logits, masks):
-    """Fraction of pixels correctly classified."""
-    predicted = logits.argmax(dim=1)
-    return (predicted == masks).float().mean().item()
+def pixel_acc(pred_cls, target):
+    return (pred_cls == target).float().mean().item()
 
 
-def mean_iou(logits, masks, num_classes=NUM_CLASSES):
-    """Mean Intersection-over-Union across all classes present in the batch."""
-    predicted = logits.argmax(dim=1)
+def mean_iou(pred_cls, target, nc=NUM_CLASSES):
     ious = []
-    for cls in range(num_classes):
-        pred_cls = predicted == cls
-        true_cls = masks == cls
-        intersection = (pred_cls & true_cls).sum().item()
-        union = (pred_cls | true_cls).sum().item()
+    for c in range(nc):
+        inter = ((pred_cls == c) & (target == c)).sum().item()
+        union = ((pred_cls == c) | (target == c)).sum().item()
         if union > 0:
-            ious.append(intersection / union)
+            ious.append(inter / union)
     return float(np.mean(ious)) if ious else 0.0
 
 
-# ---------------------------------------------------------------------------
-# One epoch helpers
-# ---------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────
+# 2D helpers  —  split volume into individual slices
+# ──────────────────────────────────────────────────────────
 
-def train_epoch(model, loader, optimizer, criterion):
-    model.train()
-    total_loss = total_acc = total_iou = 0.0
-    for images, masks in loader:
-        images, masks = images.to(DEVICE), masks.to(DEVICE)
-        optimizer.zero_grad()
-        logits = model(images)
-        loss = criterion(logits, masks)
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.item()
-        total_acc += pixel_accuracy(logits, masks)
-        total_iou += mean_iou(logits, masks)
+def _to_slices(volumes, masks):
+    """[B,4,H,W] → images [B*4,1,H,W], targets [B*4,H,W]."""
+    B, S, H, W = volumes.shape
+    return volumes.view(B * S, 1, H, W), masks.view(B * S, H, W)
+
+
+def _run_2d(model, loader, optimizer, criterion, training):
+    model.train(training)
+    tot_loss = tot_acc = tot_iou = 0.0
+    ctx = torch.enable_grad() if training else torch.no_grad()
+    with ctx:
+        for vols, msks in loader:
+            imgs, tgts = _to_slices(vols, msks)
+            imgs, tgts = imgs.to(DEVICE), tgts.to(DEVICE)
+            if training:
+                optimizer.zero_grad()
+            logits = model(imgs)
+            loss   = criterion(logits, tgts)
+            if training:
+                loss.backward()
+                optimizer.step()
+            pred = logits.argmax(1)
+            tot_loss += loss.item()
+            tot_acc  += pixel_acc(pred, tgts)
+            tot_iou  += mean_iou(pred, tgts)
     n = len(loader)
-    return total_loss / n, total_acc / n, total_iou / n
+    return tot_loss / n, tot_acc / n, tot_iou / n
 
 
-def eval_epoch(model, loader, criterion):
-    model.eval()
-    total_loss = total_acc = total_iou = 0.0
-    with torch.no_grad():
-        for images, masks in loader:
-            images, masks = images.to(DEVICE), masks.to(DEVICE)
-            logits = model(images)
-            total_loss += criterion(logits, masks).item()
-            total_acc += pixel_accuracy(logits, masks)
-            total_iou += mean_iou(logits, masks)
+# ──────────────────────────────────────────────────────────
+# 3D helpers  —  process full volume
+# ──────────────────────────────────────────────────────────
+
+def _run_3d(model, loader, optimizer, criterion, training):
+    model.train(training)
+    tot_loss = tot_acc = tot_iou = 0.0
+    ctx = torch.enable_grad() if training else torch.no_grad()
+    with ctx:
+        for vols, msks in loader:
+            imgs = vols.unsqueeze(1).to(DEVICE)   # [B,1,4,H,W]
+            tgts = msks.to(DEVICE)                # [B,4,H,W]
+            if training:
+                optimizer.zero_grad()
+            logits = model(imgs)                   # [B,NC,4,H,W]
+            loss   = criterion(logits, tgts)       # PyTorch N-D cross-entropy
+            if training:
+                loss.backward()
+                optimizer.step()
+            pred = logits.argmax(1)                # [B,4,H,W]
+            tot_loss += loss.item()
+            tot_acc  += pixel_acc(pred, tgts)
+            tot_iou  += mean_iou(pred, tgts)
     n = len(loader)
-    return total_loss / n, total_acc / n, total_iou / n
+    return tot_loss / n, tot_acc / n, tot_iou / n
 
 
-# ---------------------------------------------------------------------------
-# Training loop for one model
-# ---------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────
+# Generic training loop
+# ──────────────────────────────────────────────────────────
 
 def train_model(name, model, train_loader, val_loader, epochs=EPOCHS):
+    is_3d     = name.startswith("3D")
+    run_fn    = _run_3d if is_3d else _run_2d
     optimizer = optim.Adam(model.parameters(), lr=LR)
     criterion = nn.CrossEntropyLoss()
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5)
 
-    history = {
-        "train_loss": [], "val_loss": [],
-        "train_acc":  [], "val_acc":  [],
-        "train_iou":  [], "val_iou":  [],
-    }
+    history = {k: [] for k in
+               ("train_loss", "val_loss", "train_acc", "val_acc", "train_iou", "val_iou")}
 
-    print(f"\n{'='*60}")
-    print(f"  Training: {name}")
-    print(f"{'='*60}")
-    header = f"  {'Epoch':>5}  {'TrLoss':>8}  {'TrAcc':>7}  {'TrIoU':>7}  {'VlLoss':>8}  {'VlAcc':>7}  {'VlIoU':>7}"
-    print(header)
-    print("  " + "-" * (len(header) - 2))
+    print(f"\n{'='*62}\n  {name}  ({'3D volume' if is_3d else '2D per-slice'})\n{'='*62}")
+    print(f"  {'Ep':>3}  TrLoss  TrAcc  TrIoU  VlLoss  VlAcc  VlIoU")
+    print("  " + "─" * 54)
 
-    for epoch in range(1, epochs + 1):
-        tr_loss, tr_acc, tr_iou = train_epoch(model, train_loader, optimizer, criterion)
-        vl_loss, vl_acc, vl_iou = eval_epoch(model, val_loader, criterion)
+    for ep in range(1, epochs + 1):
+        tr_l, tr_a, tr_i = run_fn(model, train_loader, optimizer, criterion, training=True)
+        vl_l, vl_a, vl_i = run_fn(model, val_loader,   optimizer, criterion, training=False)
         scheduler.step()
 
-        history["train_loss"].append(tr_loss)
-        history["val_loss"].append(vl_loss)
-        history["train_acc"].append(tr_acc)
-        history["val_acc"].append(vl_acc)
-        history["train_iou"].append(tr_iou)
-        history["val_iou"].append(vl_iou)
+        history["train_loss"].append(tr_l); history["val_loss"].append(vl_l)
+        history["train_acc"].append(tr_a);  history["val_acc"].append(vl_a)
+        history["train_iou"].append(tr_i);  history["val_iou"].append(vl_i)
 
-        print(f"  {epoch:5d}  {tr_loss:8.4f}  {tr_acc:7.4f}  {tr_iou:7.4f}"
-              f"  {vl_loss:8.4f}  {vl_acc:7.4f}  {vl_iou:7.4f}")
+        print(f"  {ep:3d}  {tr_l:.4f}  {tr_a:.4f}  {tr_i:.4f}"
+              f"  {vl_l:.4f}  {vl_a:.4f}  {vl_i:.4f}")
 
     return history
 
 
-# ---------------------------------------------------------------------------
-# Plotting
-# ---------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────
+# Plot helpers
+# ──────────────────────────────────────────────────────────
 
-def plot_training_curves(all_histories, save_path="training_curves.png"):
-    """4-panel plot: train/val loss and accuracy per model."""
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    fig.suptitle("UNet Model Comparison – Grey Circle Segmentation", fontsize=14, fontweight="bold")
-    colors = ["tab:blue", "tab:orange", "tab:green"]
-    names = list(all_histories.keys())
+def _color(name):
+    return "tab:blue" if name.startswith("2D") else "tab:orange"
+
+def _style(name):
+    return "-" if "Small" in name else ("--" if "Medium" in name else ":")
+
+
+def plot_curves(all_histories, save="training_curves.png"):
+    fig, axes = plt.subplots(2, 3, figsize=(17, 9))
+    fig.suptitle("2D vs 3D UNet — Training Curves  (blue=2D, orange=3D)",
+                 fontsize=13, fontweight="bold")
     epochs = range(1, len(next(iter(all_histories.values()))["train_loss"]) + 1)
 
     panels = [
-        (axes[0, 0], "train_loss", "Training Loss",       "Loss"),
-        (axes[0, 1], "val_loss",   "Validation Loss",     "Loss"),
-        (axes[1, 0], "train_acc",  "Training Pixel Acc",  "Accuracy"),
-        (axes[1, 1], "val_acc",    "Validation Pixel Acc","Accuracy"),
+        (axes[0, 0], "train_loss", "Train Loss"),
+        (axes[0, 1], "val_loss",   "Val Loss"),
+        (axes[0, 2], "train_acc",  "Train Pixel Acc"),
+        (axes[1, 0], "val_acc",    "Val Pixel Acc"),
+        (axes[1, 1], "train_iou",  "Train Mean IoU"),
+        (axes[1, 2], "val_iou",    "Val Mean IoU"),
     ]
-
-    for ax, key, title, ylabel in panels:
-        for name, color in zip(names, colors):
-            ax.plot(epochs, all_histories[name][key], label=name, color=color, linewidth=2)
-        ax.set_title(title)
-        ax.set_xlabel("Epoch")
-        ax.set_ylabel(ylabel)
-        ax.legend()
-        ax.grid(True, alpha=0.3)
+    for ax, key, title in panels:
+        for name, h in all_histories.items():
+            ax.plot(epochs, h[key], label=name,
+                    color=_color(name), linestyle=_style(name), linewidth=1.8)
+        ax.set_title(title); ax.set_xlabel("Epoch"); ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=7)
 
     plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.savefig(save, dpi=150, bbox_inches="tight")
     plt.show()
-    print(f"Saved {save_path}")
+    print(f"Saved {save}")
 
 
-def plot_test_results(test_results, save_path="test_results.png"):
-    """Bar charts for test loss, accuracy, and mean IoU."""
-    names = list(test_results.keys())
-    colors = ["tab:blue", "tab:orange", "tab:green"]
+def plot_test_bars(test_results, save="test_results.png"):
+    names   = list(test_results.keys())
+    colors  = [_color(n) for n in names]
     metrics = ["loss", "acc", "iou"]
-    titles  = ["Test Loss", "Test Pixel Accuracy", "Test Mean IoU"]
+    titles  = ["Test Loss ↓", "Test Pixel Acc ↑", "Test Mean IoU ↑"]
 
-    fig, axes = plt.subplots(1, 3, figsize=(13, 4))
-    fig.suptitle("Test Set Results", fontsize=13, fontweight="bold")
+    fig, axes = plt.subplots(1, 3, figsize=(14, 5))
+    fig.suptitle("Test Set Results — 2D vs 3D UNet", fontsize=13, fontweight="bold")
 
     for ax, metric, title in zip(axes, metrics, titles):
         vals = [test_results[n][metric] for n in names]
         bars = ax.bar(names, vals, color=colors, edgecolor="black", linewidth=0.6)
         ax.set_title(title)
-        ax.set_ylim(0, max(vals) * 1.2 if max(vals) > 0 else 1)
+        ax.set_xticklabels(names, rotation=30, ha="right", fontsize=8)
         for bar, v in zip(bars, vals):
             ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
-                    f"{v:.4f}", ha="center", va="bottom", fontsize=9)
+                    f"{v:.4f}", ha="center", va="bottom", fontsize=8)
 
+    legend = [mpatches.Patch(facecolor="tab:blue",   label="2D models"),
+              mpatches.Patch(facecolor="tab:orange", label="3D models")]
+    fig.legend(handles=legend, loc="upper right", fontsize=9)
     plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.savefig(save, dpi=150, bbox_inches="tight")
     plt.show()
-    print(f"Saved {save_path}")
+    print(f"Saved {save}")
 
 
-def plot_iou_curves(all_histories, save_path="iou_curves.png"):
-    """Train and val mean-IoU curves per model."""
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-    fig.suptitle("Mean IoU Over Training", fontsize=13, fontweight="bold")
-    colors = ["tab:blue", "tab:orange", "tab:green"]
-    names = list(all_histories.keys())
-    epochs = range(1, len(next(iter(all_histories.values()))["train_iou"]) + 1)
+def plot_qualitative(all_models, test_loader, save="qualitative.png"):
+    """3 volumes × 2 slices: input | GT | 2D-Small | 2D-Medium | 3D-Small | 3D-Medium."""
+    CMAP        = plt.colormaps["tab10"].resampled(NUM_CLASSES)
+    show_models = {k: v for k, v in all_models.items()
+                   if k in ("2D-Small", "2D-Medium", "3D-Small", "3D-Medium")}
+    n_show      = 3
+    n_slices    = 2
+    n_cols      = 2 + len(show_models)   # input + GT + 4 models
 
-    for ax, phase in zip(axes, ["train", "val"]):
-        for name, color in zip(names, colors):
-            ax.plot(epochs, all_histories[name][f"{phase}_iou"],
-                    label=name, color=color, linewidth=2)
-        ax.set_title(f"{'Training' if phase == 'train' else 'Validation'} Mean IoU")
-        ax.set_xlabel("Epoch")
-        ax.set_ylabel("Mean IoU")
-        ax.legend()
-        ax.grid(True, alpha=0.3)
+    vols_b, msks_b = next(iter(test_loader))
 
+    fig, axes = plt.subplots(n_show * n_slices, n_cols,
+                             figsize=(2.8 * n_cols, 2.8 * n_show * n_slices))
+
+    col_titles = ["Input", "Ground Truth"] + list(show_models.keys())
+    for c, t in enumerate(col_titles):
+        axes[0, c].set_title(t, fontsize=8, fontweight="bold")
+
+    row = 0
+    for si in range(n_show):
+        vol = vols_b[si]   # [4, H, W]
+        gt  = msks_b[si]   # [4, H, W]
+        for z in range(n_slices):
+            axes[row, 0].imshow(vol[z].numpy(), cmap="gray", vmin=0, vmax=1)
+            axes[row, 0].axis("off")
+            axes[row, 1].imshow(gt[z].numpy(), cmap=CMAP, vmin=0, vmax=NUM_CLASSES - 1)
+            axes[row, 1].axis("off")
+
+            for col, (name, model) in enumerate(show_models.items(), start=2):
+                model.eval()
+                with torch.no_grad():
+                    if name.startswith("2D"):
+                        inp    = vol[z].unsqueeze(0).unsqueeze(0).to(DEVICE)  # [1,1,H,W]
+                        pred   = model(inp).argmax(1).squeeze(0).cpu().numpy()
+                    else:
+                        inp    = vol.unsqueeze(0).unsqueeze(0).to(DEVICE)     # [1,1,4,H,W]
+                        pred   = model(inp).argmax(1)[0, z].cpu().numpy()
+                axes[row, col].imshow(pred, cmap=CMAP, vmin=0, vmax=NUM_CLASSES - 1)
+                axes[row, col].axis("off")
+            row += 1
+
+    patches = [mpatches.Patch(color=CMAP(c), label=f"{c}: {CLASS_NAMES[c]}")
+               for c in range(NUM_CLASSES)]
+    fig.legend(handles=patches, loc="lower center", ncol=3,
+               fontsize=7, bbox_to_anchor=(0.5, -0.02))
+    plt.suptitle("Qualitative Comparison  (blue cols = 2D, orange cols = 3D)",
+                 fontsize=10, fontweight="bold")
     plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.savefig(save, dpi=130, bbox_inches="tight")
     plt.show()
-    print(f"Saved {save_path}")
+    print(f"Saved {save}")
 
 
-def plot_qualitative(models_dict, test_loader, save_path="qualitative.png"):
-    """Show 3 test images with GT mask and each model's prediction."""
-    images_batch, masks_batch = next(iter(test_loader))
-    images_batch = images_batch[:3]
-    masks_batch = masks_batch[:3]
-
-    n_images = images_batch.shape[0]
-    n_models = len(models_dict)
-    cmap = plt.colormaps["tab10"].resampled(NUM_CLASSES)
-
-    fig, axes = plt.subplots(n_images, 2 + n_models,
-                             figsize=(3 * (2 + n_models), 3 * n_images))
-    fig.suptitle("Qualitative Results (Input | GT | Model Predictions)", fontsize=12)
-
-    model_names = list(models_dict.keys())
-
-    for row in range(n_images):
-        img = images_batch[row]       # [1, H, W]
-        gt  = masks_batch[row]        # [H, W]
-
-        axes[row, 0].imshow(img.squeeze(0).numpy(), cmap="gray", vmin=0, vmax=1)
-        axes[row, 0].set_title("Input" if row == 0 else "")
-        axes[row, 0].axis("off")
-
-        axes[row, 1].imshow(gt.numpy(), cmap=cmap, vmin=0, vmax=NUM_CLASSES - 1)
-        axes[row, 1].set_title("Ground Truth" if row == 0 else "")
-        axes[row, 1].axis("off")
-
-        for col, (name, model) in enumerate(models_dict.items(), start=2):
-            model.eval()
-            with torch.no_grad():
-                logits = model(img.unsqueeze(0).to(DEVICE))
-            pred = logits.argmax(dim=1).squeeze(0).cpu().numpy()
-            axes[row, col].imshow(pred, cmap=cmap, vmin=0, vmax=NUM_CLASSES - 1)
-            axes[row, col].set_title(name if row == 0 else "")
-            axes[row, col].axis("off")
-
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches="tight")
-    plt.show()
-    print(f"Saved {save_path}")
-
-
-# ---------------------------------------------------------------------------
-# Text report
-# ---------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────
+# Final report
+# ──────────────────────────────────────────────────────────
 
 def print_report(all_histories, test_results):
-    divider = "=" * 65
-    print(f"\n{divider}")
-    print("  FINAL REPORT – Grey Circle Segmentation")
-    print(divider)
+    div = "=" * 66
+    print(f"\n{div}")
+    print("  FINAL REPORT — 2D vs 3D UNet  Brain Tumour Segmentation")
+    print(div)
+    print(f"\n  {'Model':<15} {'BestValAcc':>10} {'BestValIoU':>10}"
+          f" {'TestLoss':>9} {'TestAcc':>8} {'TestIoU':>8}")
+    print("  " + "─" * 62)
 
     for name, res in test_results.items():
         h = all_histories[name]
-        best_val_acc = max(h["val_acc"])
-        best_val_iou = max(h["val_iou"])
-        print(f"\n  {name}")
-        print(f"    Best Val Acc : {best_val_acc:.4f}")
-        print(f"    Best Val IoU : {best_val_iou:.4f}")
-        print(f"    Test Loss    : {res['loss']:.4f}")
-        print(f"    Test Acc     : {res['acc']:.4f}")
-        print(f"    Test IoU     : {res['iou']:.4f}")
+        print(f"  {name:<15} {max(h['val_acc']):10.4f} {max(h['val_iou']):10.4f}"
+              f" {res['loss']:9.4f} {res['acc']:8.4f} {res['iou']:8.4f}")
 
-    winner_acc = max(test_results, key=lambda n: test_results[n]["acc"])
-    winner_iou = max(test_results, key=lambda n: test_results[n]["iou"])
-    print(f"\n  Best test accuracy : {winner_acc}")
-    print(f"  Best test mean IoU : {winner_iou}")
-    print(f"{divider}\n")
+    d2_iou = np.mean([test_results[n]["iou"] for n in test_results if n.startswith("2D")])
+    d3_iou = np.mean([test_results[n]["iou"] for n in test_results if n.startswith("3D")])
+    d2_acc = np.mean([test_results[n]["acc"] for n in test_results if n.startswith("2D")])
+    d3_acc = np.mean([test_results[n]["acc"] for n in test_results if n.startswith("3D")])
+
+    winner_iou = "3D" if d3_iou > d2_iou else "2D"
+    winner_acc = "3D" if d3_acc > d2_acc else "2D"
+
+    print(f"\n  Group averages (test set):")
+    print(f"    2D models — IoU: {d2_iou:.4f}   Acc: {d2_acc:.4f}")
+    print(f"    3D models — IoU: {d3_iou:.4f}   Acc: {d3_acc:.4f}")
+    print(f"\n  ▶  {winner_iou} models win on mean IoU  (Δ = {abs(d3_iou - d2_iou):.4f})")
+    print(f"  ▶  {winner_acc} models win on pixel Acc (Δ = {abs(d3_acc - d2_acc):.4f})")
+
+    if winner_iou == "3D":
+        print("\n  Interpretation: 3D models benefit from inter-slice context —")
+        print("  they can track tumours that are small or faint in a single slice")
+        print("  but consistent across the volume.")
+    else:
+        print("\n  Interpretation: 2D models match or exceed 3D here — the tumours")
+        print("  are large enough to be identifiable per-slice, and 2D models")
+        print("  generalise efficiently without the 3D memory overhead.")
+    print(f"{div}\n")
 
 
-# ---------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────
 # Main
-# ---------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────
 
 def main():
-    print(f"Device: {DEVICE}")
-
+    print(f"Device : {DEVICE}")
     train_loader, val_loader, test_loader = get_dataloaders(
-        train_size=2000, val_size=400, test_size=400, batch_size=BATCH_SIZE
+        train_size=2000, val_size=400, test_size=400, batch_size=BATCH
     )
 
-    models = get_models(DEVICE)
+    models_2d = get_2d_models(DEVICE)
+    models_3d = get_3d_models(DEVICE)
     criterion = nn.CrossEntropyLoss()
 
     all_histories = {}
-    test_results = {}
+    test_results  = {}
 
-    for name, model in models.items():
+    for name, model in {**models_2d, **models_3d}.items():
         history = train_model(name, model, train_loader, val_loader, epochs=EPOCHS)
         all_histories[name] = history
 
-        test_loss, test_acc, test_iou = eval_epoch(model, test_loader, criterion)
-        test_results[name] = {"loss": test_loss, "acc": test_acc, "iou": test_iou}
-        print(f"  → Test | Loss: {test_loss:.4f}  Acc: {test_acc:.4f}  IoU: {test_iou:.4f}")
+        is_3d    = name.startswith("3D")
+        eval_fn  = _run_3d if is_3d else _run_2d
+        tl, ta, ti = eval_fn(model, test_loader, None, criterion, training=False)
+        test_results[name] = {"loss": tl, "acc": ta, "iou": ti}
+        print(f"  → Test | Loss: {tl:.4f}  Acc: {ta:.4f}  IoU: {ti:.4f}")
 
-    # --- plots ---
-    plot_training_curves(all_histories)
-    plot_iou_curves(all_histories)
-    plot_test_results(test_results)
-    plot_qualitative(models, test_loader)
-
-    # --- text report ---
+    plot_curves(all_histories)
+    plot_test_bars(test_results)
+    plot_qualitative({**models_2d, **models_3d}, test_loader)
     print_report(all_histories, test_results)
 
 
