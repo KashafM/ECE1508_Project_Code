@@ -5,7 +5,7 @@ def run_synthstrip(input_path, output_path):
     print("Running Skull Stripping")
     input_path = os.path.abspath(input_path)
     output_path = os.path.abspath(output_path)
-    model_path = "../training/synthstrip.pt"
+    model_path = "synthstrip.pt"
 
     cmd = [
         "nipreps-synthstrip",

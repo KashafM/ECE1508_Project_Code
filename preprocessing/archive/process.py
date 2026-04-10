@@ -1,10 +1,9 @@
 import os
 from pathlib import Path
-from preprocessing.bias_correction import bias_correction
-from preprocessing.skull_strip import run_synthstrip
-from preprocessing.resize import image_resample
-from preprocessing.normalize import normalization
-import multiprocessing as mp
+from preprocessing.archive.bias_correction import bias_correction
+from preprocessing.archive.skull_strip import run_synthstrip
+from preprocessing.archive.resize import image_resample
+from preprocessing.archive.normalize import normalization
 
 os.environ['SITK_SHOW_COMMAND'] = '/Applications/Slicer.app/Contents/MacOS/Slicer'
 
