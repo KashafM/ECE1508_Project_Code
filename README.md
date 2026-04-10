@@ -78,5 +78,5 @@ Our project aims to investigate segmentation models for brain tumor segmentation
 
 - Create a synapse.org account and create a ~/.synapseConfig file in users home directory with authorization token
 - Run the preprocessing >> download.py file to download the dataset
-- Run the preprocessing >> FileProcessing_TrainTestValidationSplit.py file to that returns preprocessed data (update directories as indicated in script)
-- Run training >> training.ipynb (update directories as indicated in script) 
+- Run the preprocessing >> FileProcessing_TrainTestValidationSplit.py file that returns preprocessed data (update directories as indicated in script)
+- Run training >> training.ipynb to train model with preprocessed data (update directories as indicated in script) 
