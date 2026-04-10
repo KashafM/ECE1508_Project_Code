@@ -47,7 +47,7 @@ Our project aims to investigate segmentation models for brain tumor segmentation
 
 
 
-### FileProcessing+TrainTestValidationSplit.py
+### FileProcessing_TrainTestValidationSplit.py
 - Processes files from BraTS 2024 database for post-treatment glioma
 - Converts .nii files into arrays
 - Downsamples inputs using mean-pooling or gaussian filter + sub-sampling to reduce the size of the image by a factor of 8
@@ -56,13 +56,10 @@ Our project aims to investigate segmentation models for brain tumor segmentation
 - After all brain scans have been converted into .h5 files they are split into train, test, validation datasets (each in their own folder)
 
 
-### Inputs+LabelVisualization.ipynb
+### Inputs_LabelVisualization.ipynb
 - Takes one brain scan and visualizes the inputs and labels for one z-slice of the 3d image
 - Four inputs: T1 (t1n), Post Contrast T1 Weighted (t1c), T2 Weighted (t2w), T2 FLAIR (t2f)
-- Five labels for output: Normal Tissue, Necrotic Tumor Core, Tumor Infiltration and Edema, Enhancing Tumor Core, Resection Cavity
-
-### FilePreprocessing.py
-- Pipeline for implementing pre-processing for the images
+- Five labels for output: Normal Tissue, Necrotic Tumor Core, Tumor Infiltration and Edema, Enhancing Tumor Core, Resection CavityÍ
 
 ### Training.ipynb
 - To be used in Google Colab
