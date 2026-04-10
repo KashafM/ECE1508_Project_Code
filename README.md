@@ -69,4 +69,14 @@ Our project aims to investigate segmentation models for brain tumor segmentation
 - Visualizes prediction and ground truth using 2d slices and 3d plot
 
 
- 
+
+
+## Set-Up
+
+
+
+
+- Create a synapse.org account and create a ~/.synapseConfig file in users home directory with authorization token
+- Run the preprocessing >> download.py file to download the dataset
+- Run the preprocessing >> FileProcessing_TrainTestValidationSplit.py file to that returns preprocessed data (update directories as indicated in script)
+- Run training >> training.ipynb (update directories as indicated in script) 
