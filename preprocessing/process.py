@@ -6,8 +6,6 @@ from preprocessing.resize import image_resample
 from preprocessing.normalize import normalization
 import multiprocessing as mp
 
-os.environ['SITK_SHOW_COMMAND'] = '/Applications/Slicer.app/Contents/MacOS/Slicer'
-
 def process_subject(subject_folder):
     print(f"Processing {subject_folder}")
     #raw = os.path.join("../dataset/training_data1_v2", subject_folder)
